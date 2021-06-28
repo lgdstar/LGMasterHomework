@@ -406,6 +406,12 @@ callAlloc(Class cls, bool checkNil, bool allocWithZone=false)
 bool hasCustomAWZ() const {
     return !cache.getBit(FAST_CACHE_HAS_DEFAULT_AWZ);
 }
+void setHasDefaultAWZ() {
+    cache.setBit(FAST_CACHE_HAS_DEFAULT_AWZ);
+}
+void setHasCustomAWZ() {
+    cache.clearBit(FAST_CACHE_HAS_DEFAULT_AWZ);
+}
 
 //getBit
 #if __LP64__
@@ -437,6 +443,8 @@ private:
 }
 ```
 
+`hasCustomAWZ` 直译理解为 **是否存在自定义的 `allocwithZone:` 函数**，根据其后的取反宏`FAST_CACHE_HAS_DEFAULT_AWZ` 的注释，扩展为 **是否存在自定义的 `alloc/allocwithZone:` 函数**
+
 ### <font color=red> warning  - 遗留问题：</font>
 
  此处 _flags 的赋值时机不太清晰
@@ -447,11 +455,15 @@ private:
 
 - 由于两次取反 `!` ，可认为 `cache.getBit(FAST_CACHE_HAS_DEFAULT_AWZ)` 的取值等同于 `!cls->ISA()->hasCustomAWZ()` 
 - `FAST_CACHE_HAS_DEFAULT_AWZ` 根据其宏定义的注释 `class or superclass has default alloc/allocWithZone: implementation` ，理解为 其类或父类存在默认生效或实施的 `alloc/allocWithZone:` 方法
-- 综合上述两个观点，此时的判断语句可解析为：存在默认生效的 `alloc/allocWithZone:` 方法时，执行 `if` 内部语句，执行 `_objc_rootAllocWithZone` 来进行后续的实例创建；不存在时，执行外部语句进行 `objc_msgSend` 进行消息转发
+- 综合上述两个观点，此时的判断语句可解析为：存在默认生效的 `alloc/allocWithZone:` 方法时，执行 `if` 内部语句，执行 `_objc_rootAllocWithZone` 来进行后续的实例创建；不存在时(即进行了自定义 `alloc/allocWithZone:` 方法 ) 或者` _flags = nil`时，执行外部语句进行 `objc_msgSend` 进行消息转发
 
 ##### 3）`objc_msgSend` 调用
 
-上述判断逻辑，由于 `_flags` 为 `nil` ，最终执行 `objc_msgSend `。可理解为此时当前类不存在默认生效的 `alloc/allocWithZone:` 方法。 `objc_msgSend` 的流程过长，后续进行单独展开。
+上述判断逻辑，由于 `_flags` 为 `nil` ，最终执行 `objc_msgSend `。
+
+>  猜想此时应该是类的 cache_t 还未创建导致 _flags 为空，待确认后修改
+
+ `objc_msgSend` 的流程过长，后续进行单独展开。
 
 此处根据消息查找机制，查询到 `+ (id)alloc` 方法，进行调用
 
@@ -459,9 +471,11 @@ private:
 
 此后在通过 `_objc_rootAlloc` 函数调起的第二次执行的 `callAlloc` 方法中，此时由于 `_flags` 取值不为空 ，使得 `getBit` 函数返回 `true`， 从而引起 `hasCustomAWZ` 取值为 `false`， 最终造成分支判断条件 `!cls->ISA()->hasCustomAWZ()`  为 `true` ，从而执行判断内部代码
 
->  可否理解为 `objc_alloc` 函数已经实现，存在默认生效的 `alloc`方法
+>  可否理解为 `objc_alloc` 函数已经实现，存在默认生效的 `alloc`方法；
+>
+> 应该是类的 cache_t 的 _flags 标志存储有值，待 cache_t 探究后验证
 
-此时 `_flags & flags` 为真，由于 `flags` 在`hasCustomAWZ` 函数调用时传参 `FAST_CACHE_HAS_DEFAULT_AWZ = 0x4000` ，则 `_flags` 取值必大于 `0x4000`。此问题又回到了上述遗留问题 `_flags` 的赋值时机问题
+此时 `_flags & flags` 为真，由于 `flags` 在`hasCustomAWZ` 函数调用时传参 `FAST_CACHE_HAS_DEFAULT_AWZ = 0x4000` ，则 `_flags` 取值必在二进制第14位为 1 。此问题又回到了上述遗留问题 `_flags` 的赋值时机问题
 
 > 为什么 `!cls->ISA()->hasCustomAWZ()`  为 `true` ？ 
 >
