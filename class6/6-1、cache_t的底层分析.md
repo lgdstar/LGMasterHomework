@@ -84,6 +84,8 @@ private:
 
 对照可验证 成员名称都对应上了
 
+#### 提出疑问
+
 当前的数据结构展示出来了，问题也来了
 
 1、`cache_t` 作为缓存的数据结构，他缓存的什么数据？是缓存属性、缓存方法亦或缓存其他的东西，这就需要我们在探索中不断验证
@@ -225,7 +227,73 @@ public:
 
 现在可以确定缓存存储的确实是方法 `sel` 和 `imp` 了
 
-缓存方法肯定不能只能缓存一个，那么回到 `cache_t` ，这个结构是怎样存储多个 `bucket_t` 和使用其中的数据的呢？
+#### 疑问总结和拓展
+
+根据上述分析，提出的问题1已经进行了解答，存储的是方法 `SEL` 和 `IMP` 
+
+既然缓存的是方法，那么肯定不能只能缓存一个，那么回到 `cache_t` ，此时对问题2 又进行了扩展
+
+- `cache_t` 中的那个成员变量用于标识或存储 `buchet_t` 呢？
+- 这个结构是怎样存储多个 `bucket_t` 和使用其中的数据的呢？
+
+带着问题我们接下来进行探索
+
+#### bucket_t 来源
+
+首先就要找出是哪个成员变量存储了 `bucket_t` 相关的数据
+
+怎么找呢？ 又回到源码的使用上去，在 `insert` 方法中肯定要获取到 `bucket_t` 数据，只要查看源码怎么获取的不就清楚了，那么来看下
+
+```C++
+void cache_t::insert(SEL sel, IMP imp, id receiver)
+{
+    // ... 省略
+  
+    bucket_t *b = buckets();
+  
+  // ... 省略
+}
+```
+
+在 `insert` 方法中，使用 `buckets()` 获取到了 `bucket_t * ` ，那么来查看先 `buckets()` 的方法实现，点进去
+
+```C++
+struct bucket_t *cache_t::buckets() const
+{
+    uintptr_t addr = _bucketsAndMaybeMask.load(memory_order_relaxed); // [拓展2]
+    return (bucket_t *)(addr & bucketsMask);
+}
+```
+
+发现了对应的成员变量 `_bucketsAndMaybeMask` ，
+
+此段代码操作读取 `_bucketsAndMaybeMask`  此成员变量的值赋值给 `uintptr_t addr` ，使用 `addr & bucketsMask` 并最终进行强转成 `bucket_t *` 
+
+查看 `bucketsMask` 
+
+```C++
+// struct cache_t 中
+#if CACHE_MASK_STORAGE == CACHE_MASK_STORAGE_OUTLINED // [拓展3]
+    // _bucketsAndMaybeMask is a buckets_t pointer
+    // _maybeMask is the buckets mask
+
+    static constexpr uintptr_t bucketsMask = ~0ul;
+```
+
+当前环境 `CACHE_MASK_STORAGE` 策略为 `CACHE_MASK_STORAGE_OUTLINED` ，`bucketsMask` 就按如上取值： 非0，全F，当前环境 ul 8字节，十六进制下16个F
+
+这里查看到注释 
+
+```C++
+    // _bucketsAndMaybeMask is a buckets_t pointer
+    // _maybeMask is the buckets mask
+```
+
+表明 `_bucketsAndMaybeMask` 是 `buckets_t` 指针，此处使用的是 `buckets_t` ，那么应该是个类似指针集合或数组的，那么这个指针就是首地址了
+
+这个理论是否正确稍后进行 `lldb` 输出验证
+
+那么此时 `bucket_t` 的来源就有些明了了，是从 `_bucketsAndMaybeMask` 中加载了指针地址，那么这个指针地址指向的数据结构到底是怎么样的呢，接下来就探索 `bucket_t ` 的存储方式
 
 #### bucket_t 存储方式
 
@@ -280,6 +348,15 @@ static inline mask_t cache_hash(SEL sel, mask_t mask)
 ```
 
 进行了相关位运算，那么这个方法应该是一个 `hash` 算法，当前应当是以哈希表(Hashtable，又称 "散列")形式存储的，而 `bucket` 可以称为包含集合(哈希表)中元素的哈希桶，其存储相应的值数据，可以让集合(哈希表)中的搜寻和获取工作更容易、更快速 [参考1]
+
+#### 总结
+
+通过上面的两次探索，我们了解了 `bucket_t` 的来源和存储方式，那么汇总结论：
+
+- `bucket_t` 是以散列表方式进行存储
+-  `_bucketsAndMaybeMask`  作为一个指针数据，存储了指向散列表的指针，由于可以使用内存偏移方式获取其相关数据，那么类比数组，此指针也是 `bucket_t` 散列表的首地址
+
+
 
 进行到这里，`cache_t` 的结构我们大致有了了解，那么绘图描绘一下当前的结构来更直观的展示下
 
@@ -487,7 +564,7 @@ log 输出了，说明方法已经调用了，再次查看 `bucket_t` 数据
 根据数据结构的分析，在这里提供了两种获取方式
 
 - 方式1 指针地址偏移，使用首地址偏移方式直接在指针后加1，获取对应的指针后取值
-- 方式2 仿照 `insert` 函数内的实现，例如 `b[i].sel()` ，直接通过 `bucket_t *` 指针使用中括号取值(与数组的索引值取值方式一样)， 同时这里的 `sel()` 方法也提供了，能输出 `SEL` 
+- 方式2 仿照 `insert` 函数内的实现，例如 `b[i].sel()` ，直接通过 `bucket_t *` 指针使用中括号取值(与数组的索引值取值方式一样 [拓展1])， 同时这里的 `sel()` 方法也提供了，能输出 `SEL` 
 
 那么来验证下分析的结果
 
@@ -623,6 +700,51 @@ public:
 
 输出结果一致，此方式也是没有问题的
 
+#### buckets 相关验证
+
+验证 `_bucketsAndMaybeMask` 是指向存储 `bucket_t` 数据散列表的首地址的指针数据
+
+```shell
+(lldb) x/4gx LGPerson.class
+0x100008428: 0x0000000100008450 0x000000010036a140
+0x100008438: 0x000000010070fd00 0x0001802800000007
+(lldb) p/x 0x100008438
+(long) $1 = 0x0000000100008438
+(lldb) p (cache_t *)$1
+(cache_t *) $2 = 0x0000000100008438
+(lldb) p *$2
+(cache_t) $3 = {
+  _bucketsAndMaybeMask = {
+    std::__1::atomic<unsigned long> = {
+      Value = 4302372096
+    }
+  }
+   = {
+     = {
+      _maybeMask = {
+        std::__1::atomic<unsigned int> = {
+          Value = 7
+        }
+      }
+      _flags = 32808
+      _occupied = 1
+    }
+    _originalPreoptCache = {
+      std::__1::atomic<preopt_cache_t *> = {
+        Value = 0x0001802800000007
+      }
+    }
+  }
+}
+
+(lldb) p/x 4302372096
+(long) $4 = 0x000000010070fd00
+(lldb) p $3.buckets()
+(bucket_t *) $5 = 0x000000010070fd00
+```
+
+对比 `$4` 和 `$5` 地址相同，就验证了 `_bucketsAndMaybeMask` 是指向存储 `bucket_t` 数据散列表的首地址的指针数据
+
 
 
 ## 参考
@@ -631,3 +753,200 @@ public:
 
 [Linux内核中的hash与bucket][http://www.nowamagic.net/academy/detail/3008086]
 
+
+
+## 拓展
+
+### 拓展1  b[i]形式取值
+
+使用 `b[i]` 形式取值例如：`$12[1]` ， 是否意味着 `b` 是一个数组呢？
+
+解析： 不正确， 这种形式的取值本质上是内存平移一个单位。 数组使用此方式获取值其实也是使用内存平移来获取的
+
+在此 bucke_t 相关数据中 `$12[1]` 获取的 `bucket_t` 即是 `$​12 + 1` 偏移后指针指向的值
+
+### 拓展2 .load(memory_order_relaxed)
+
+在 `buckets()` 方法中看到这个方法使用，很多位置都用到了 `load` 这个方法稍微介绍下
+
+```C++
+struct bucket_t *cache_t::buckets() const
+{
+    uintptr_t addr = _bucketsAndMaybeMask.load(memory_order_relaxed);
+    return (bucket_t *)(addr & bucketsMask);
+}
+```
+
+使用 C++ 相关的解释
+
+模板类 `std::atomic` 中封装的操作方法
+
+```C++
+T load (memory_order sync = memory_order_seq_cst) const volatile noexcept;
+T load (memory_order sync = memory_order_seq_cst) const noexcept;
+```
+
+读取被封装的值，参数 `sync` 设置内存序(Memory Order)
+
+针对上面示例方法解释
+
+```C++
+// 读取 _bucketsAndMaybeMask 对象的值
+_bucketsAndMaybeMask.load(memory_order_relaxed);
+```
+
+参考链接：
+
+[C++11 并发指南六(  类型详解二 std::atomic )](https://www.cnblogs.com/haippy/p/3301408.html)
+
+### 拓展3 不同架构下的  CACHE_MASK_STORAGE
+
+首先查看源码
+
+```C++
+#define CACHE_MASK_STORAGE_OUTLINED 1
+#define CACHE_MASK_STORAGE_HIGH_16 2
+#define CACHE_MASK_STORAGE_LOW_4 3
+#define CACHE_MASK_STORAGE_HIGH_16_BIG_ADDRS 4
+
+#if defined(__arm64__) && __LP64__
+#if TARGET_OS_OSX || TARGET_OS_SIMULATOR
+#define CACHE_MASK_STORAGE CACHE_MASK_STORAGE_HIGH_16_BIG_ADDRS
+#else
+#define CACHE_MASK_STORAGE CACHE_MASK_STORAGE_HIGH_16
+#endif
+#elif defined(__arm64__) && !__LP64__
+#define CACHE_MASK_STORAGE CACHE_MASK_STORAGE_LOW_4
+#else
+#define CACHE_MASK_STORAGE CACHE_MASK_STORAGE_OUTLINED
+#endif
+
+```
+
+不同架构下策略定义不同
+
+#### ` __arm64__  && __LP64__`
+
+>  LP64 指的是 LP64数据模型，Unix 和 Unix 类的系统(Linux / MacOS 系统) 均使用此数据模型
+>
+> 32位环境涉及"ILP32"数据模型，是因为C数据类型为32位的int、long、指针。而64位环境使用不同的数据模型，此时的long和指针已为64位，故称作"LP64"数据模型。
+>
+> 参考：[数据模型(LP32 ILP32 LP64 LLP64 ILP64)][https://www.cnblogs.com/lsgxeva/p/7614856.html]
+
+##### TARGET_OS_OSX || TARGET_OS_SIMULATOR
+
+在 `arm64 && LP64` 下的OSX 系统下或者 模拟器情况下使用 `CACHE_MASK_STORAGE_HIGH_16_BIG_ADDRS`
+
+> undo:  使用M1版 Mac 验证是否是大端，此处是指大端么？
+
+> 我这里根据源码解读的是 `BIG_ADDRS` 表示地址较大时，对比 `CACHE_MASK_STORAGE_HIGH_16_BIG_ADDRS` 与 `CACHE_MASK_STORAGE_HIGH_16` 发现后者存在必须为0的 `maskZeroBits` 占据高位， 那么 `bucketsMask` 的值要比前者小很多
+>
+> 有可能是 OSX 和 模拟器处理的数据比较大
+
+此类型下 `cache_t` 中的相关静态变量赋值
+
+```C++
+#elif CACHE_MASK_STORAGE == CACHE_MASK_STORAGE_HIGH_16_BIG_ADDRS
+    static constexpr uintptr_t maskShift = 48;
+    static constexpr uintptr_t maxMask = ((uintptr_t)1 << (64 - maskShift)) - 1;
+    static constexpr uintptr_t bucketsMask = ((uintptr_t)1 << maskShift) - 1;
+    
+    static_assert(bucketsMask >= MACH_VM_MAX_ADDRESS, "Bucket field doesn't have enough bits for arbitrary pointers.");
+```
+
+根据源码可知 `bucketsMask` 使用 低48的位置， 留给 `cache_mask` 的位置就是 高16位
+
+##### else
+
+上述条件的 `else` 条件下，策略为 `CACHE_MASK_STORAGE_HIGH_16`
+
+```C++
+#elif CACHE_MASK_STORAGE == CACHE_MASK_STORAGE_HIGH_16
+    // _bucketsAndMaybeMask is a buckets_t pointer in the low 48 bits
+    // _maybeMask is unused, the mask is stored in the top 16 bits.
+
+    // How much the mask is shifted by.
+    static constexpr uintptr_t maskShift = 48;
+
+    // Additional bits after the mask which must be zero. msgSend
+    // takes advantage of these additional bits to construct the value
+    // `mask << 4` from `_maskAndBuckets` in a single instruction(操作).
+    static constexpr uintptr_t maskZeroBits = 4;
+
+    // The largest mask value we can store.
+    static constexpr uintptr_t maxMask = ((uintptr_t)1 << (64 - maskShift)) - 1;
+    
+    // The mask applied to `_maskAndBuckets` to retrieve the buckets pointer.
+    static constexpr uintptr_t bucketsMask = ((uintptr_t)1 << (maskShift - maskZeroBits)) - 1;
+    
+    // Ensure we have enough bits for the buckets pointer.
+    static_assert(bucketsMask >= MACH_VM_MAX_ADDRESS,
+            "Bucket field doesn't have enough bits for arbitrary pointers.");
+
+#if CONFIG_USE_PREOPT_CACHES
+    static constexpr uintptr_t preoptBucketsMarker = 1ul;
+#if __has_feature(ptrauth_calls)
+    // 63..60: hash_mask_shift
+    // 59..55: hash_shift
+    // 54.. 1: buckets ptr + auth
+    //      0: always 1
+    static constexpr uintptr_t preoptBucketsMask = 0x007ffffffffffffe;
+    static inline uintptr_t preoptBucketsHashParams(const preopt_cache_t *cache) {
+        uintptr_t value = (uintptr_t)cache->shift << 55;
+        // masks have 11 bits but can be 0, so we compute
+        // the right shift for 0x7fff rather than 0xffff
+        return value | ((objc::mask16ShiftBits(cache->mask) - 1) << 60);
+    }
+#else
+    // 63..53: hash_mask
+    // 52..48: hash_shift
+    // 47.. 1: buckets ptr
+    //      0: always 1
+    static constexpr uintptr_t preoptBucketsMask = 0x0000fffffffffffe;
+    static inline uintptr_t preoptBucketsHashParams(const preopt_cache_t *cache) {
+        return (uintptr_t)cache->hash_params << 48;
+    }
+#endif
+#endif // CONFIG_USE_PREOPT_CACHES
+```
+
+此时  `cache_mask` 的位置依然是 高16位，但是其后的 4位必须是0，看注释是 `msgSend` 进行了 `mask << 4` 使用
+
+```C++
+// msgSend takes advantage of these additional bits to construct the value `mask << 4` from `_maskAndBuckets` in a single instruction(操作).
+```
+
+至于后面的 `CONFIG_USE_PREOPT_CACHES` ，遇到了再分析
+
+##### `__arm64__ && !__LP64__`
+
+arm64架构下同时非 LP64数据模型下使用 `CACHE_MASK_STORAGE_LOW_4`
+
+```C++
+#elif CACHE_MASK_STORAGE == CACHE_MASK_STORAGE_LOW_4
+    // _bucketsAndMaybeMask is a buckets_t pointer in the top 28 bits
+    // _maybeMask is unused, the mask length is stored in the low 4 bits
+
+    static constexpr uintptr_t maskBits = 4;
+    static constexpr uintptr_t maskMask = (1 << maskBits) - 1;
+    static constexpr uintptr_t bucketsMask = ~maskMask;
+    static_assert(!CONFIG_USE_PREOPT_CACHES, "preoptimized caches not supported");
+#else
+```
+
+非 LP64数据模型，应该是 32位环境，此时低 4位作为 `cache_mask` ，高 28位用来作为 `bucketsMask` ， 注释也写的比较明白
+
+##### else
+
+最后的大致就是 非 `arm64` 下，当前使用的非M1版Mac就属于此，使用策略 `CACHE_MASK_STORAGE_OUTLINED`
+
+```C++
+#if CACHE_MASK_STORAGE == CACHE_MASK_STORAGE_OUTLINED
+    // _bucketsAndMaybeMask is a buckets_t pointer
+    // _maybeMask is the buckets mask
+
+    static constexpr uintptr_t bucketsMask = ~0ul;
+    static_assert(!CONFIG_USE_PREOPT_CACHES, "preoptimized caches not supported");
+```
+
+这个在正文中分析过了
