@@ -231,7 +231,7 @@ static inline mask_t cache_fill_ratio(mask_t capacity) {
     return capacity * 3 / 4;
 }
 
-#elif __arm64__ && !__LP64__
+#elif __arm64__ && !__LP64__  // arm64_32  watchOS架构
 
 // objc_msgSend has lots of registers available.
 // Cache scan decrements. No end marker needed.
@@ -270,6 +270,13 @@ static inline mask_t cache_fill_ratio(mask_t capacity) {
 ```
 
 此处 `INIT_CACHE_SIZE` 等于 `1<<2 = 4` ，`capacity` 赋值即为 4
+
+此处开辟 4 个的原因在注释中有写，对比 else 下的真机情况的注释，有助于让我们了解为什么开辟这么多
+
+- 当前  `  When we have a cache end marker it fills a bucket slot, so having a initial cache size of 2 buckets would not be efficient when one of the slots is always filled with the end marker. So start with a cache size 4 buckets.`
+
+- else 下 ` Allow an initial bucket size of 2 buckets, since a large number of classes, especially metaclasses, have very few imps, and we support the ability to fill 100% of the cache before resizing.`
+- 由 else 下的注释看，默认时开辟 2 个 `buckets` 由于大多数类尤其是元类只包含很少的 `imps` ，而对当前存在 `End marker` 结束标识的类型，由于结束标识已经占用一个位置，这时只开辟 2 个就效率不高了，所以翻倍开辟4个
 
 ###### reallocate()
 
@@ -485,7 +492,7 @@ struct bucket_t *cache_t::buckets() const
 
 从 `_bucketsAndMaybeMask` 加载 `bucket_t` 指针数据
 
-此处 `mask_t m = capacity - 1;` 由于存在 `End Marker` 因此需要减 1 才是剩余的可用容量
+此处 `mask_t m = capacity - 1;` 设置 `m` 为最后一个数据的索引值
 
 ###### cache_hash()
 
@@ -690,7 +697,7 @@ FULL_UTILIZATION_CACHE_SIZE = (1 << FULL_UTILIZATION_CACHE_SIZE_LOG2),
 
 此处判断语句就可以翻译为  `capacity <= 8 && newOccupied <= capacity`
 
-此情况再加上 `else if 1` 中的逻辑在此判断之前执行，就对应了其注释 `// Allow 100% cache utilization for small buckets. Use it as-is.`  允许当前缓存方法添加后缓存容器充满
+此情况再加上 `else if 1` 中的逻辑在此判断之前执行，就对应了其注释 `// Allow 100% cache utilization for small buckets. Use it as-is.`  允许当前缓存方法添加后缓存容器充满；同时此注释中的 `for small buckets` 也证实了判断条件 `capacity <= 8 ` ，只有容量小于 8 的 `small buckets` 允许填满，之后再进行扩容后依旧只执行 `else if 1` 中的 `Cache is less than 3/4 or 7/8 full` 的扩容条件判断，无法再次进入此判断语句了
 
 ##### 最后 else
 

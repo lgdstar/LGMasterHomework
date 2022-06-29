@@ -860,6 +860,8 @@ _bucketsAndMaybeMask.load(memory_order_relaxed);
 
 上述条件的 `else` 条件下，策略为 `CACHE_MASK_STORAGE_HIGH_16`
 
+此条件下 `__arm64__` 且 `__LP64__` 数据模型，同时非 `OSX` 和 模拟器，那么指的是 `arm64` 位下的真机情况
+
 ```C++
 #elif CACHE_MASK_STORAGE == CACHE_MASK_STORAGE_HIGH_16
     // _bucketsAndMaybeMask is a buckets_t pointer in the low 48 bits
@@ -934,11 +936,18 @@ arm64架构下同时非 LP64数据模型下使用 `CACHE_MASK_STORAGE_LOW_4`
 #else
 ```
 
-非 LP64数据模型，应该是 32位环境，此时低 4位作为 `cache_mask` ，高 28位用来作为 `bucketsMask` ， 注释也写的比较明白
+非 LP64数据模型，应该是 32位环境，根据其他位置的注释应该是 `arm64_32` 架构(watchOS使用的架构 参考《4-1、isa分析》拓展2)
+
+```C++
+# if  __ARM_ARCH_7K__ >= 2  ||  (__arm64__ && !__LP64__)
+    // armv7k or arm64_32
+```
+
+此时低 4位作为 `cache_mask` ，高 28位用来作为 `bucketsMask` ， 注释也写的比较明白
 
 ##### else
 
-最后的大致就是 非 `arm64` 下，当前使用的非M1版Mac就属于此，使用策略 `CACHE_MASK_STORAGE_OUTLINED`
+最后的大致就是 非 `arm64` 下，当前使用的非M1版Mac就属于此(Intel处理器)，使用策略 `CACHE_MASK_STORAGE_OUTLINED`
 
 ```C++
 #if CACHE_MASK_STORAGE == CACHE_MASK_STORAGE_OUTLINED

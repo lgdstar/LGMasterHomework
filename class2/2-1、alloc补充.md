@@ -485,3 +485,8 @@ private:
 
 ### 拓展1、SEL 与 IMP
 
+SEL 作为方法名称，其形参变量名为 _cmd
+
+`SEL _cmd` 类比 `id self`
+
+IMP 是函数指针，是类似页码，指向函数的地址
